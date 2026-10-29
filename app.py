@@ -11,7 +11,12 @@ from google import genai
 from dotenv import load_dotenv
 import streamlit as st
 
+load_dotenv()
 
+# Check local .env first; fallback to Streamlit Cloud secrets
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+if not GEMINI_API_KEY and "GEMINI_API_KEY" in st.secrets:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 
 
 st.set_page_config(page_title="FootfallCam - AI Staff Tracker", layout="wide")
