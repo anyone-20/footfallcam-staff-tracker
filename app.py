@@ -1,24 +1,21 @@
-import subprocess
-import sys
-import os
+import streamlit as st
+import cv2
 import numpy as np
 import pandas as pd
 import tempfile
 import time
-import cv2
+import os
 from PIL import Image
 from ultralytics import YOLO
 from google import genai
 from dotenv import load_dotenv
-import streamlit as st
 
+# --- Load Environment Variables & Secrets ---
 load_dotenv()
 
-# Check local .env first; fallback to Streamlit Cloud secrets
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 if not GEMINI_API_KEY and "GEMINI_API_KEY" in st.secrets:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-
 
 st.set_page_config(page_title="FootfallCam - AI Staff Tracker", layout="wide")
 
@@ -32,7 +29,7 @@ st.markdown(
 def detect_tag_features(roi_bgr, templates_gray):
     """
     Combines horizontal Sobel edge stripe density (for the piano-key badge)
-    with multi-scale template matching across 360-degree orientations.
+    with multi-scale template matching across orientations.
     """
     if roi_bgr is None or roi_bgr.size == 0 or roi_bgr.shape[0] < 12 or roi_bgr.shape[1] < 12:
         return 0.0
@@ -144,7 +141,7 @@ col_video, col_results = st.columns([1.3, 1])
 
 if run_btn:
     if not GEMINI_API_KEY:
-        st.error("Missing Gemini API Key! Please ensure `GEMINI_API_KEY` is defined in your `.env` file or environment.")
+        st.error("Missing Gemini API Key! Please ensure `GEMINI_API_KEY` is configured in your `.env` file or Streamlit Cloud Secrets.")
         st.stop()
 
     # 1. Resolve Video Input
@@ -164,8 +161,8 @@ if run_btn:
 
     if tag_sources:
         for f in tag_sources:
-            b = np.asarray(bytearray(f.read()), dtype=np.uint8)
-            t_color = cv2.imdecode(b, cv2.IMREAD_COLOR)
+            file_bytes = np.frombuffer(f.read(), dtype=np.uint8)
+            t_color = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
             if t_color is not None:
                 if tag_ref_color is None:
                     tag_ref_color = t_color
@@ -248,7 +245,7 @@ if run_btn:
                     "bbox_y2": y2
                 })
 
-                # Dual ROI: Upper body & Lower body (accommodates normal & inverted orientation)
+                # Dual ROI: Upper body & Lower body (accommodates orientation shifts)
                 roi_top = frame[y1:y1 + int(0.50 * h), x1:x2]
                 roi_bottom = frame[y2 - int(0.50 * h):y2, x1:x2]
 
@@ -273,7 +270,7 @@ if run_btn:
                     lbl = f"Corridor ID {tid}"
 
                 cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
-                cv2.circle(display_frame, (cx, cy), 3, (0, 255, 255), -1)
+                cv2.circle(display_frame, (cx, cy), 3, (0, 0, 255), -1)
                 cv2.putText(display_frame, lbl, (x1, max(20, y1 - 8)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
 
@@ -295,7 +292,6 @@ if run_btn:
         st.subheader("📋 Results & Deliverables")
         st.markdown("#### 🤖 Multimodal Gemini 2.5 Flash Verification")
 
-        # Filter tracks that moved substantially vertically along the corridor
         walking_tracks = {}
         for tid, pts in track_positions.items():
             if len(pts) >= 10:
@@ -313,23 +309,23 @@ if run_btn:
             for cand_id, (hits, disp) in sorted_walkers[:4]:
                 if cand_id in track_best_crops:
                     crop = track_best_crops[cand_id][1]
-                    with st.spinner(f"Verifying Track ID {cand_id} with Gemini Flash..."):
+                    with st.spinner(f"Verifying Track ID {int(cand_id)} with Gemini Flash..."):
                         is_conf, reasoning = verify_tag_with_gemini(crop, tag_ref_color, GEMINI_API_KEY)
 
-                    st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), caption=f"Crop for Track ID {cand_id}", width=150)
+                    st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), caption=f"Crop for Track ID {int(cand_id)}", width=150)
 
                     if is_conf:
-                        st.success(f"**Gemini Confirmed Staff (Track ID {cand_id}):** {reasoning}")
-                        confirmed_staff_ids.append(cand_id)
+                        st.success(f"**Gemini Confirmed Staff (Track ID {int(cand_id)}):** {reasoning}")
+                        confirmed_staff_ids.append(int(cand_id))
                     else:
-                        st.warning(f"**Gemini Output (Track ID {cand_id}):** {reasoning}")
+                        st.warning(f"**Gemini Output (Track ID {int(cand_id)}):** {reasoning}")
 
-            # Fallback heuristic: combine the top 2 corridor walking tracks
+            # Heuristic fallback to primary corridor tracks if API verification fails
             if not confirmed_staff_ids:
-                confirmed_staff_ids = [sorted_walkers[0][0]]
+                confirmed_staff_ids = [int(sorted_walkers[0][0])]
                 if len(sorted_walkers) > 1:
-                    confirmed_staff_ids.append(sorted_walkers[1][0])
-                st.info(f"Fallback to leading corridor walker tracklets: {confirmed_staff_ids}")
+                    confirmed_staff_ids.append(int(sorted_walkers[1][0]))
+                st.info(f"Fallback to leading corridor walker tracklets: {[int(x) for x in confirmed_staff_ids]}")
 
         if not confirmed_staff_ids:
             st.error("No walking corridor staff detected.")
@@ -337,11 +333,10 @@ if run_btn:
             st.success(f"Confirmed Staff Tracklet IDs: **{[int(x) for x in confirmed_staff_ids]}**")
 
             df_all = pd.DataFrame(all_detections)
-            # Unify fragmented corridor tracks into a single continuous dataframe
             df_staff = df_all[df_all["track_id"].isin(confirmed_staff_ids)].copy().sort_values("frame")
             df_staff["staff_present"] = 1
 
-            # Task 2 Bonus: Coordinates
+            # Task 2 Bonus: Coordinates Only
             st.markdown("**Task 2 [Bonus]: Staff Coordinates (X, Y)**")
             display_cols = ["frame", "timestamp_s", "track_id", "x_center", "y_center", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]
             st.dataframe(df_staff[display_cols].head(40), height=220, use_container_width=True)
