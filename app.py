@@ -1,18 +1,26 @@
-import streamlit as st
-import cv2
+import subprocess
+import sys
+
+# Auto-install opencv-python-headless if Streamlit Cloud skipped it
+try:
+    import cv2
+except ModuleNotFoundError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "opencv-python-headless"])
+    import cv2
+
+import os
 import numpy as np
 import pandas as pd
 import tempfile
 import time
-import os
 from PIL import Image
 from ultralytics import YOLO
 from google import genai
 from dotenv import load_dotenv
+import streamlit as st
 
-# --- Load Environment Variables ---
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+
 
 st.set_page_config(page_title="FootfallCam - AI Staff Tracker", layout="wide")
 
