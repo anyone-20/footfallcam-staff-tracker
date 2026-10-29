@@ -1,13 +1,5 @@
 import subprocess
 import sys
-
-# Auto-install opencv-python-headless if Streamlit Cloud skipped it
-try:
-    import cv2
-except ModuleNotFoundError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "opencv-python-headless"])
-    import cv2
-
 import os
 import numpy as np
 import pandas as pd
