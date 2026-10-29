@@ -183,11 +183,17 @@ if run_btn:
     with st.spinner(f"Loading {model_choice}..."):
         model = YOLO(model_choice)
 
-    cap = cv2.VideoCapture(video_path)
+cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-    vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+
+    # Downscale target (640px wide while preserving aspect ratio)
+    target_w = 640
+    scale_factor = target_w / float(orig_w) if orig_w > target_w else 1.0
+    vid_w = int(orig_w * scale_factor)
+    vid_h = int(orig_h * scale_factor)
 
     with col_video:
         st.subheader("🎥 Live Feed & Corridor Tracking")
@@ -205,14 +211,18 @@ if run_btn:
     corridor_min_x = int(0.32 * vid_w)
     corridor_max_x = int(0.72 * vid_w)
 
-    while cap.isOpened():
+while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        results = model.track(frame, persist=True, classes=[0], verbose=False)
-        display_frame = frame.copy()
+        # Resize the frame if original is larger than target_w
+        if scale_factor < 1.0:
+            frame = cv2.resize(frame, (vid_w, vid_h), interpolation=cv2.INTER_AREA)
 
+        results = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[0], verbose=False)
+        display_frame = frame.copy()
+        
         if corridor_only:
             cv2.line(display_frame, (corridor_min_x, 0), (corridor_min_x, vid_h), (100, 100, 100), 1)
             cv2.line(display_frame, (corridor_max_x, 0), (corridor_max_x, vid_h), (100, 100, 100), 1)
