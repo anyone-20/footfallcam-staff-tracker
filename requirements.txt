@@ -4,5 +4,6 @@ numpy
 pandas
 pillow
 ultralytics
+lapx
 google-genai
 python-dotenv
