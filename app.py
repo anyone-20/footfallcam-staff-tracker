@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import tempfile
 import time
+import cv2
 from PIL import Image
 from ultralytics import YOLO
 from google import genai
