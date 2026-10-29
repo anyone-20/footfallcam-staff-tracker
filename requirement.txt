@@ -1,0 +1,8 @@
+streamlit
+opencv-python-headless
+numpy
+pandas
+pillow
+ultralytics
+google-genai
+python-dotenv
