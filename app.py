@@ -180,7 +180,7 @@ if run_btn:
         st.error("Missing tag templates: Upload at least one tag image or add tag_template.png.")
         st.stop()
 
-   with st.spinner(f"Loading {model_choice}..."):
+    with st.spinner(f"Loading {model_choice}..."):
         model = YOLO(model_choice)
 
     cap = cv2.VideoCapture(video_path)
@@ -211,7 +211,7 @@ if run_btn:
     corridor_min_x = int(0.32 * vid_w)
     corridor_max_x = int(0.72 * vid_w)
 
-while cap.isOpened():
+    while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
@@ -222,7 +222,7 @@ while cap.isOpened():
 
         results = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[0], verbose=False)
         display_frame = frame.copy()
-
+        
         if corridor_only:
             cv2.line(display_frame, (corridor_min_x, 0), (corridor_min_x, vid_h), (100, 100, 100), 1)
             cv2.line(display_frame, (corridor_max_x, 0), (corridor_max_x, vid_h), (100, 100, 100), 1)
