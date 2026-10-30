@@ -76,11 +76,9 @@ def detect_tag_features(roi_bgr, templates_gray):
 # --- Multimodal Gemini VLM Verifier ---
 def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
     """
-    Calls active Gemini VLM models with backoff retry.
-    Returns (is_confirmed: bool, reasoning_or_error: str).
+    Dynamically fetches available models or uses active Gemini Flash models
+    with exponential backoff and retry.
     """
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-pro']
-
     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
     crop_pil = Image.fromarray(crop_rgb)
 
@@ -102,9 +100,24 @@ def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
     except Exception as e:
         return False, f"Client Initialization Error: {str(e)}"
 
+    # Discover available active models for your API key
+    available_models = []
+    try:
+        for m in client.models.list():
+            m_id = m.name.replace("models/", "") if hasattr(m, "name") else str(m)
+            # Prioritize multimodal flash models supporting content generation
+            if "flash" in m_id.lower() and "embed" not in m_id.lower():
+                available_models.append(m_id)
+    except Exception:
+        pass
+
+    # Fallback list of active endpoints
+    if not available_models:
+        available_models = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-flash-latest']
+
     last_error = ""
 
-    for model_name in models_to_try:
+    for model_name in available_models:
         for attempt in range(3):
             try:
                 response = client.models.generate_content(
@@ -117,10 +130,12 @@ def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
             except Exception as e:
                 err_str = str(e)
                 last_error = f"[{model_name}] {err_str}"
+                # Transient error: backoff and retry
                 if any(code in err_str.upper() for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 else:
+                    # Non-transient (e.g. 404 retired model, 400 bad params), break to next model
                     break
 
     return False, f"API Error: {last_error}"
