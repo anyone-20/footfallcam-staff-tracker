@@ -30,7 +30,7 @@ def detect_tag_features(roi_bgr, templates_gray):
     """
     Combines horizontal Sobel edge stripe density (for the piano-key badge)
     with multi-scale template matching across orientations.
-    Requires minimum correlation to avoid false edge hits on desk cables.
+    Suppresses standalone edge noise from cables and furniture.
     """
     if roi_bgr is None or roi_bgr.size == 0 or roi_bgr.shape[0] < 12 or roi_bgr.shape[1] < 12:
         return 0.0
@@ -65,7 +65,7 @@ def detect_tag_features(roi_bgr, templates_gray):
                     if max_v > best_template_score:
                         best_template_score = max_v
 
-    # Suppress standalone edge noise (e.g., cables, desk edges)
+    # Suppress standalone high-contrast edges (cables/desk corners) without visual template correlation
     if best_template_score < 0.32:
         return best_template_score
 
@@ -76,10 +76,10 @@ def detect_tag_features(roi_bgr, templates_gray):
 # --- Multimodal Gemini VLM Verifier ---
 def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
     """
-    Calls Gemini VLM with exponential backoff and automatic model fallback.
+    Calls active Gemini VLM models with backoff retry.
     Returns (is_confirmed: bool, reasoning_or_error: str).
     """
-    models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
+    models_to_try = ['gemini-2.5-flash', 'gemini-2.5-pro']
 
     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
     crop_pil = Image.fromarray(crop_rgb)
@@ -222,7 +222,7 @@ if run_btn:
     track_best_crops = {}
     frame_idx = 0
 
-    # Walking aisle bounding limits (narrowed to exclude left/right desks)
+    # Walking aisle bounding limits (narrowed to exclude side desks)
     corridor_min_x = int(0.38 * vid_w)
     corridor_max_x = int(0.68 * vid_w)
 
@@ -234,7 +234,7 @@ if run_btn:
         if scale_factor < 1.0:
             frame = cv2.resize(frame, (vid_w, vid_h), interpolation=cv2.INTER_AREA)
 
-        # High confidence to reject monitor mounts, desk clutter, and chair backs
+        # Higher confidence suppresses monitor mounts, chair tops, and cables
         results = model.track(
             frame,
             persist=True,
@@ -258,11 +258,11 @@ if run_btn:
                 w, h = x2 - x1, y2 - y1
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-                # Corridor aisle gating
+                # Corridor horizontal boundary check
                 if corridor_only and (cx < corridor_min_x or cx > corridor_max_x):
                     continue
 
-                # Exclude lower workstation desk table zone
+                # Desk exclusion zone: suppress lower workstation table zone
                 is_desk_zone = (cy > int(0.48 * vid_h)) and (cx < int(0.55 * vid_w))
                 if corridor_only and is_desk_zone:
                     continue
@@ -293,7 +293,7 @@ if run_btn:
                 best_score = max(score_top, score_bottom)
                 best_crop = roi_top if score_top >= score_bottom else roi_bottom
 
-                # Motion check: require displacement along corridor to ignore stationary/seated people
+                # Motion verification: person must have displaced along the aisle
                 is_actively_moving = False
                 if len(track_positions[tid]) >= 6:
                     recent = track_positions[tid][-6:]
@@ -342,7 +342,7 @@ if run_btn:
             if len(pts) >= 10:
                 ys = [p[1] for p in pts]
                 y_disp = max(ys) - min(ys)
-                # Ensure meaningful corridor travel distance
+                # Verify that the trajectory has significant traversal down the corridor
                 if y_disp > (0.15 * vid_h):
                     votes = track_tag_votes.get(tid, 0)
                     walking_tracks[tid] = (votes, y_disp)
@@ -366,7 +366,7 @@ if run_btn:
                     else:
                         st.warning(f"**Gemini Output (Track ID {int(cand_id)}):** {reasoning}")
 
-            # Heuristic fallback to top corridor walker if API was inconclusive
+            # Fallback to leading corridor walker if API was inconclusive
             if not confirmed_staff_ids and sorted_walkers:
                 if sorted_walkers[0][1][0] > 0:
                     confirmed_staff_ids = [int(sorted_walkers[0][0])]
