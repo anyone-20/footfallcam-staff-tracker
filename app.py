@@ -103,13 +103,61 @@ def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
                 text = response.text.strip()
                 is_yes = "VERDICT: YES" in text.upper() or text.upper().startswith("YES")
                 return is_yes, f"[{model_name}] {text}"
+         # --- Multimodal Gemini VLM Verifier ---
+def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
+    """
+    Calls Gemini VLM with exponential backoff and automatic model fallback.
+    Returns (is_confirmed: bool, reasoning_or_error: str).
+    """
+    models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
+    
+    crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+    crop_pil = Image.fromarray(crop_rgb)
+
+    tag_rgb = cv2.cvtColor(tag_template_bgr, cv2.COLOR_BGR2RGB)
+    tag_pil = Image.fromarray(tag_rgb)
+
+    prompt = (
+        "You are evaluating whether an individual in overhead surveillance footage is wearing an official staff badge.\n"
+        "- Image 1: The official staff badge reference (black and white rectangular badge / piano-key pattern).\n"
+        "- Image 2: A cropped chest view of a walking individual from an overhead 3D sensor.\n\n"
+        "Due to overhead camera resolution, distance, and motion blur, the badge may appear blurred, small, or low-contrast.\n"
+        "Is the person in Image 2 wearing the badge shown in Image 1 (or its blurred equivalent on dark clothing)?\n"
+        "Reply strictly in this format:\n"
+        "VERDICT: [YES/NO] | REASON: [1-sentence explanation]"
+    )
+
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        return False, f"Client Initialization Error: {str(e)}"
+
+    last_error = ""
+
+    for model_name in models_to_try:
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[tag_pil, crop_pil, prompt]
+                )
+                text = response.text.strip()
+                is_yes = "VERDICT: YES" in text.upper() or text.upper().startswith("YES")
+                return is_yes, f"[{model_name}] {text}"
+
             except Exception as e:
                 err_str = str(e)
-                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
-                    time.sleep(1.5 * (attempt + 1))  # Exponential wait: 1.5s, 3.0s, 4.5s
+                last_error = f"[{model_name}] {err_str}"
+                
+                # Check for rate limit (429) or transient server load (503/UNAVAILABLE)
+                if any(code in err_str.upper() for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
+                    time.sleep(2.0 * (attempt + 1))
                     continue
                 else:
+                    # Non-transient error (e.g., 400 Bad Request, 403 Forbidden, 404 Model Not Found)
                     break
+
+    return False, f"API Call Failed: {last_error}"
 
     return False, "API Error: All fallback models are currently experiencing high demand."
 
