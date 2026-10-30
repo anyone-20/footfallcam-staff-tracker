@@ -67,15 +67,50 @@ def detect_tag_features(roi_bgr, templates_gray):
     combined = 0.5 * best_template_score + 0.5 * min(1.0, stripe_score * 1.5)
     return max(best_template_score, combined)
 
-
 # --- Multimodal Gemini VLM Verifier ---
+def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
+    """
+    Calls Gemini VLM with exponential backoff and automatic model fallback
+    to prevent 503 UNAVAILABLE spikes from stopping the pipeline.
+    """
+    models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
+    
+    crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+    crop_pil = Image.fromarray(crop_rgb)
+
+    tag_rgb = cv2.cvtColor(tag_template_bgr, cv2.COLOR_BGR2RGB)
+    tag_pil = Image.fromarray(tag_rgb)
+
+    prompt = (
+        "You are evaluating whether an individual in overhead surveillance footage is wearing an official staff badge.\n"
+        "- Image 1: The official staff badge reference (black and white rectangular badge / piano-key pattern).\n"
+        "- Image 2: A cropped chest view of a walking individual from an overhead 3D sensor.\n\n"
+        "Due to overhead camera resolution, distance, and motion blur, the badge may appear blurred, small, or low-contrast.\n"
+        "Is the person in Image 2 wearing the badge shown in Image 1 (or its blurred equivalent on dark clothing)?\n"
+        "Reply strictly in this format:\n"
+        "VERDICT: [YES/NO] | REASON: [1-sentence explanation]"
+    )
+
+    client = genai.Client(api_key=api_key)
+
+    for model_name in models_to_try:
+        for attempt in range(3):  # Retry up to 3 times per model
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[tag_pil, crop_pil, prompt]
+                )
+                text = response.text.strip()
+                is_yes = "VERDICT: YES" in text.upper() or text.upper().startswith("YES")
+                return is_yes, f"[{model_name}] {text}"
+         # --- Multimodal Gemini VLM Verifier ---
 def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
     """
     Calls Gemini VLM with exponential backoff and automatic model fallback.
     Returns (is_confirmed: bool, reasoning_or_error: str).
     """
     models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
-
+    
     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
     crop_pil = Image.fromarray(crop_rgb)
 
@@ -109,17 +144,22 @@ def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
                 text = response.text.strip()
                 is_yes = "VERDICT: YES" in text.upper() or text.upper().startswith("YES")
                 return is_yes, f"[{model_name}] {text}"
+
             except Exception as e:
                 err_str = str(e)
                 last_error = f"[{model_name}] {err_str}"
+                
+                # Check for rate limit (429) or transient server load (503/UNAVAILABLE)
                 if any(code in err_str.upper() for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
-                    time.sleep(1.5 * (attempt + 1))
+                    time.sleep(2.0 * (attempt + 1))
                     continue
                 else:
+                    # Non-transient error (e.g., 400 Bad Request, 403 Forbidden, 404 Model Not Found)
                     break
 
-    return False, f"API Error: {last_error}"
+    return False, f"API Call Failed: {last_error}"
 
+    return False, "API Error: All fallback models are currently experiencing high demand."
 
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Model Architecture & Vision")
@@ -132,8 +172,8 @@ st.sidebar.markdown("---")
 st.sidebar.header("📁 Input Files & Thresholds")
 video_source = st.sidebar.file_uploader("Upload Video (.mp4)", type=["mp4"])
 tag_sources = st.sidebar.file_uploader(
-    "Upload Tag Reference Images (Multiple)",
-    type=["png", "jpg", "jpeg"],
+    "Upload Tag Reference Images (Multiple)", 
+    type=["png", "jpg", "jpeg"], 
     accept_multiple_files=True
 )
 
@@ -230,7 +270,7 @@ if run_btn:
 
         results = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[0], verbose=False)
         display_frame = frame.copy()
-
+        
         if corridor_only:
             cv2.line(display_frame, (corridor_min_x, 0), (corridor_min_x, vid_h), (100, 100, 100), 1)
             cv2.line(display_frame, (corridor_max_x, 0), (corridor_max_x, vid_h), (100, 100, 100), 1)
