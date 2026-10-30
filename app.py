@@ -30,6 +30,7 @@ def detect_tag_features(roi_bgr, templates_gray):
     """
     Combines horizontal Sobel edge stripe density (for the piano-key badge)
     with multi-scale template matching across orientations.
+    Requires minimum correlation to avoid false edge hits on desk cables.
     """
     if roi_bgr is None or roi_bgr.size == 0 or roi_bgr.shape[0] < 12 or roi_bgr.shape[1] < 12:
         return 0.0
@@ -64,17 +65,22 @@ def detect_tag_features(roi_bgr, templates_gray):
                     if max_v > best_template_score:
                         best_template_score = max_v
 
-    combined = 0.5 * best_template_score + 0.5 * min(1.0, stripe_score * 1.5)
+    # Suppress standalone edge noise (e.g., cables, desk edges)
+    if best_template_score < 0.32:
+        return best_template_score
+
+    combined = 0.6 * best_template_score + 0.4 * min(1.0, stripe_score * 1.2)
     return max(best_template_score, combined)
+
 
 # --- Multimodal Gemini VLM Verifier ---
 def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
     """
-    Calls Gemini VLM with exponential backoff and automatic model fallback
-    to prevent 503 UNAVAILABLE spikes from stopping the pipeline.
+    Calls Gemini VLM with exponential backoff and automatic model fallback.
+    Returns (is_confirmed: bool, reasoning_or_error: str).
     """
     models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
-    
+
     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
     crop_pil = Image.fromarray(crop_rgb)
 
@@ -91,10 +97,15 @@ def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
         "VERDICT: [YES/NO] | REASON: [1-sentence explanation]"
     )
 
-    client = genai.Client(api_key=api_key)
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        return False, f"Client Initialization Error: {str(e)}"
+
+    last_error = ""
 
     for model_name in models_to_try:
-        for attempt in range(3):  # Retry up to 3 times per model
+        for attempt in range(3):
             try:
                 response = client.models.generate_content(
                     model=model_name,
@@ -105,13 +116,15 @@ def verify_tag_with_gemini(crop_bgr, tag_template_bgr, api_key):
                 return is_yes, f"[{model_name}] {text}"
             except Exception as e:
                 err_str = str(e)
-                if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
-                    time.sleep(1.5 * (attempt + 1))  # Exponential wait: 1.5s, 3.0s, 4.5s
+                last_error = f"[{model_name}] {err_str}"
+                if any(code in err_str.upper() for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
+                    time.sleep(1.5 * (attempt + 1))
                     continue
                 else:
                     break
 
-    return False, "API Error: All fallback models are currently experiencing high demand."
+    return False, f"API Error: {last_error}"
+
 
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ Model Architecture & Vision")
@@ -120,17 +133,18 @@ model_choice = st.sidebar.selectbox(
     ["yolov8n.pt", "yolov8s.pt", "yolo11n.pt", "yolov8n-pose.pt"]
 )
 
+yolo_conf = st.sidebar.slider("YOLO Person Confidence", 0.25, 0.80, 0.52, 0.02)
+conf_thresh = st.sidebar.slider("Tag Matching Threshold", 0.20, 0.80, 0.40, 0.02)
+corridor_only = st.sidebar.checkbox("Corridor Gating (Ignore Desks/Chairs)", value=True)
+
 st.sidebar.markdown("---")
-st.sidebar.header("📁 Input Files & Thresholds")
+st.sidebar.header("📁 Input Files")
 video_source = st.sidebar.file_uploader("Upload Video (.mp4)", type=["mp4"])
 tag_sources = st.sidebar.file_uploader(
-    "Upload Tag Reference Images (Multiple)", 
-    type=["png", "jpg", "jpeg"], 
+    "Upload Tag Reference Images (Multiple)",
+    type=["png", "jpg", "jpeg"],
     accept_multiple_files=True
 )
-
-conf_thresh = st.sidebar.slider("Tag Matching Threshold", 0.20, 0.80, 0.35, 0.02)
-corridor_only = st.sidebar.checkbox("Corridor Gating (Ignore Desks/Chairs)", value=True)
 
 run_btn = st.sidebar.button("🚀 Run Live Detection", use_container_width=True)
 
@@ -208,21 +222,29 @@ if run_btn:
     track_best_crops = {}
     frame_idx = 0
 
-    corridor_min_x = int(0.32 * vid_w)
-    corridor_max_x = int(0.72 * vid_w)
+    # Walking aisle bounding limits (narrowed to exclude left/right desks)
+    corridor_min_x = int(0.38 * vid_w)
+    corridor_max_x = int(0.68 * vid_w)
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Resize the frame if original is larger than target_w
         if scale_factor < 1.0:
             frame = cv2.resize(frame, (vid_w, vid_h), interpolation=cv2.INTER_AREA)
 
-        results = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[0], verbose=False)
+        # High confidence to reject monitor mounts, desk clutter, and chair backs
+        results = model.track(
+            frame,
+            persist=True,
+            tracker="bytetrack.yaml",
+            classes=[0],
+            conf=yolo_conf,
+            verbose=False
+        )
         display_frame = frame.copy()
-        
+
         if corridor_only:
             cv2.line(display_frame, (corridor_min_x, 0), (corridor_min_x, vid_h), (100, 100, 100), 1)
             cv2.line(display_frame, (corridor_max_x, 0), (corridor_max_x, vid_h), (100, 100, 100), 1)
@@ -236,7 +258,13 @@ if run_btn:
                 w, h = x2 - x1, y2 - y1
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
+                # Corridor aisle gating
                 if corridor_only and (cx < corridor_min_x or cx > corridor_max_x):
+                    continue
+
+                # Exclude lower workstation desk table zone
+                is_desk_zone = (cy > int(0.48 * vid_h)) and (cx < int(0.55 * vid_w))
+                if corridor_only and is_desk_zone:
                     continue
 
                 if tid not in track_positions:
@@ -255,7 +283,7 @@ if run_btn:
                     "bbox_y2": y2
                 })
 
-                # Dual ROI: Upper body & Lower body (accommodates orientation shifts)
+                # Dual ROI: Upper body & Lower body
                 roi_top = frame[y1:y1 + int(0.50 * h), x1:x2]
                 roi_bottom = frame[y2 - int(0.50 * h):y2, x1:x2]
 
@@ -265,8 +293,15 @@ if run_btn:
                 best_score = max(score_top, score_bottom)
                 best_crop = roi_top if score_top >= score_bottom else roi_bottom
 
+                # Motion check: require displacement along corridor to ignore stationary/seated people
+                is_actively_moving = False
+                if len(track_positions[tid]) >= 6:
+                    recent = track_positions[tid][-6:]
+                    disp = np.linalg.norm(np.array(recent[-1]) - np.array(recent[0]))
+                    is_actively_moving = disp > (0.03 * vid_h)
+
                 tag_found_here = False
-                if best_score >= conf_thresh:
+                if best_score >= conf_thresh and is_actively_moving:
                     track_tag_votes[tid] = track_tag_votes.get(tid, 0) + 1
                     tag_found_here = True
                     if tid not in track_best_crops or best_score > track_best_crops[tid][0]:
@@ -300,14 +335,15 @@ if run_btn:
     # --- Verification & Deliverables ---
     with col_results:
         st.subheader("📋 Results & Deliverables")
-        st.markdown("#### 🤖 Multimodal Gemini 2.5 Flash Verification")
+        st.markdown("#### 🤖 Multimodal Gemini Verification")
 
         walking_tracks = {}
         for tid, pts in track_positions.items():
             if len(pts) >= 10:
                 ys = [p[1] for p in pts]
                 y_disp = max(ys) - min(ys)
-                if y_disp > (0.12 * vid_h):
+                # Ensure meaningful corridor travel distance
+                if y_disp > (0.15 * vid_h):
                     votes = track_tag_votes.get(tid, 0)
                     walking_tracks[tid] = (votes, y_disp)
 
@@ -330,12 +366,11 @@ if run_btn:
                     else:
                         st.warning(f"**Gemini Output (Track ID {int(cand_id)}):** {reasoning}")
 
-            # Heuristic fallback to primary corridor tracks if API verification fails
-            if not confirmed_staff_ids:
-                confirmed_staff_ids = [int(sorted_walkers[0][0])]
-                if len(sorted_walkers) > 1:
-                    confirmed_staff_ids.append(int(sorted_walkers[1][0]))
-                st.info(f"Fallback to leading corridor walker tracklets: {[int(x) for x in confirmed_staff_ids]}")
+            # Heuristic fallback to top corridor walker if API was inconclusive
+            if not confirmed_staff_ids and sorted_walkers:
+                if sorted_walkers[0][1][0] > 0:
+                    confirmed_staff_ids = [int(sorted_walkers[0][0])]
+                    st.info(f"Fallback to top corridor walker tracklet: {confirmed_staff_ids}")
 
         if not confirmed_staff_ids:
             st.error("No walking corridor staff detected.")
@@ -346,7 +381,6 @@ if run_btn:
             df_staff = df_all[df_all["track_id"].isin(confirmed_staff_ids)].copy().sort_values("frame")
             df_staff["staff_present"] = 1
 
-            # Task 2 Bonus: Coordinates Only
             st.markdown("**Task 2 [Bonus]: Staff Coordinates (X, Y)**")
             display_cols = ["frame", "timestamp_s", "track_id", "x_center", "y_center", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]
             st.dataframe(df_staff[display_cols].head(40), height=220, use_container_width=True)
